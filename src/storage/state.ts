@@ -62,7 +62,7 @@ export function loadDogHangerState(deviceId: string): DogHangerState {
     breedId: 2,
     collarColor: 'red',
     accessory: 'none',
-    playerName: 'Hondenbaas',
+    playerName: 'Player',
     soundEnabled: true,
     bestTimeSec: 0,
     highscores: [],
@@ -72,6 +72,8 @@ export function loadDogHangerState(deviceId: string): DogHangerState {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return base;
     const parsed = JSON.parse(raw) as Partial<DogHangerState>;
+    const rawName = typeof parsed.playerName === 'string' ? parsed.playerName.trim() : '';
+    const resolvedName = rawName && rawName !== 'Hondenbaas' ? rawName : 'Player';
     return {
       deviceId,
       apiBaseUrl:
@@ -81,10 +83,7 @@ export function loadDogHangerState(deviceId: string): DogHangerState {
       breedId: typeof parsed.breedId === 'number' ? parsed.breedId : 2,
       collarColor: parsed.collarColor || 'red',
       accessory: parsed.accessory || 'none',
-      playerName:
-        typeof parsed.playerName === 'string' && parsed.playerName.trim()
-          ? parsed.playerName.trim()
-          : 'Hondenbaas',
+      playerName: resolvedName,
       soundEnabled: parsed.soundEnabled !== false,
       bestTimeSec: Math.max(0, Number(parsed.bestTimeSec || 0)),
       highscores: Array.isArray(parsed.highscores) ? parsed.highscores : [],
@@ -108,7 +107,7 @@ export function recordDogHangerScore(state: DogHangerState, timeSec: number): vo
   if (rounded > state.bestTimeSec) state.bestTimeSec = rounded;
   state.highscores.push({
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-    playerName: state.playerName.trim() || 'Hondenbaas',
+    playerName: state.playerName.trim() || 'Player',
     timeSec: rounded,
     breedId: state.breedId,
     collarColor: state.collarColor,
