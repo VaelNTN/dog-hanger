@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Dog Hanger</string>
+    <string name="title_activity_main">Dog Hanger</string>
+    <string name="package_name">com.doghanger.game</string>
+    <string name="custom_url_scheme">com.doghanger.game</string>
+</resources>
