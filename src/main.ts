@@ -157,13 +157,14 @@ function showScreen(name: ScreenName): void {
   if (name === 'home') startHomePreview();
   else stopHomePreview();
 
+  if (hsPollInterval !== null) {
+    clearInterval(hsPollInterval);
+    hsPollInterval = null;
+  }
   if (name === 'highscores') {
     document.getElementById('server-box')?.classList.add('hidden');
     refreshHighscoresView();
     hsPollInterval = window.setInterval(() => refreshHighscoresView(), 12000);
-  } else if (hsPollInterval !== null) {
-    clearInterval(hsPollInterval);
-    hsPollInterval = null;
   }
 }
 
@@ -178,26 +179,30 @@ function startHomePreview(): void {
     pill.classList.add('hidden');
   }
 
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = 150 * dpr;
+  canvas.height = 150 * dpr;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
   let phase = 0;
-  const draw = () => {
-    phase += 0.03;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = 150 * dpr;
-    canvas.height = 150 * dpr;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.scale(dpr, dpr);
-      drawCartoonDog(ctx, 75, 68 + Math.sin(phase * 2) * 4, 34, {
-        breed: getDogBreed(state.breedId),
-        collarColor: state.collarColor,
-        accessory: state.accessory,
-        pose: 'portrait',
-        animPhase: phase,
-      });
-    }
+  let last = performance.now();
+  const draw = (now: number) => {
+    const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
+    last = now;
+    phase += dt * 1.8;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, 150, 150);
+    drawCartoonDog(ctx, 75, 68 + Math.sin(phase * 2) * 4, 34, {
+      breed: getDogBreed(state.breedId),
+      collarColor: state.collarColor,
+      accessory: state.accessory,
+      pose: 'portrait',
+      animPhase: phase,
+    });
     homeAnimId = requestAnimationFrame(draw);
   };
-  draw();
+  homeAnimId = requestAnimationFrame(draw);
 }
 
 function stopHomePreview(): void {
@@ -289,10 +294,12 @@ function startStage(): void {
         },
         onRelease: (sec) => {
           soundFX.playSplash();
+          const prevBest = state.bestTimeSec;
+          const rounded = Math.round(sec * 100) / 100;
           recordDogHangerScore(state, sec);
           document.getElementById('timer-status')!.textContent = `Splash at ${sec.toFixed(2)} s!`;
           document.getElementById('round-banner-text')!.textContent =
-            sec >= state.bestTimeSec
+            rounded > prevBest && rounded > 0
               ? `New Best: ${sec.toFixed(2)} s!`
               : `Time: ${sec.toFixed(2)} s (Best: ${state.bestTimeSec.toFixed(2)} s)`;
           document.getElementById('round-banner')!.classList.remove('hidden');

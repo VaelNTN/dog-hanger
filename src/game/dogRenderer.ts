@@ -16,28 +16,45 @@ export function drawCartoonDog(
     accessory: DogAccessoryId;
     pose: 'portrait' | 'hang' | 'fall';
     animPhase?: number;
+    effort?: number;
+    swingVel?: number;
   }
 ): void {
-  const { breed, collarColor, accessory, pose, animPhase = 0 } = opts;
+  const {
+    breed,
+    collarColor,
+    accessory,
+    pose,
+    animPhase = 0,
+    effort = 0,
+    swingVel = 0,
+  } = opts;
   const collarHex = getCollarHex(collarColor);
   const s = size;
-  const wag = Math.sin(animPhase * 12) * 0.35;
+  const wagSpeed = pose === 'fall' ? 18 : 11 + effort * 7;
+  const wagAmp = pose === 'fall' ? 0.55 : 0.36 + effort * 0.2;
+  const wag = Math.sin(animPhase * wagSpeed) * wagAmp;
 
   ctx.save();
   ctx.translate(x, y);
 
+  // Tail
   ctx.save();
   ctx.translate(-s * 0.45, s * 0.45);
   ctx.rotate(-0.6 + wag);
-  ctx.strokeStyle = breed.fur;
-  ctx.lineWidth = s * 0.24;
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = s * 0.29;
   ctx.lineCap = 'round';
   ctx.beginPath();
   ctx.moveTo(0, 0);
   ctx.quadraticCurveTo(-s * 0.4, -s * 0.35, -s * 0.25, -s * 0.72);
   ctx.stroke();
+  ctx.strokeStyle = breed.fur;
+  ctx.lineWidth = s * 0.21;
+  ctx.stroke();
   ctx.restore();
 
+  // Body
   ctx.fillStyle = breed.fur;
   ctx.beginPath();
   ctx.ellipse(0, s * 0.5, s * 0.56, s * 0.65, 0, 0, Math.PI * 2);
@@ -46,6 +63,7 @@ export function drawCartoonDog(
   ctx.strokeStyle = '#0f172a';
   ctx.stroke();
 
+  // Belly
   ctx.fillStyle = breed.belly;
   ctx.beginPath();
   ctx.ellipse(0, s * 0.56, s * 0.34, s * 0.44, 0, 0, Math.PI * 2);
@@ -64,6 +82,7 @@ export function drawCartoonDog(
     }
   }
 
+  // Front paws
   const armY = pose === 'hang' ? -s * 0.94 : pose === 'fall' ? -s * 0.55 : s * 0.35;
   for (const px of [-s * 0.56, s * 0.56]) {
     ctx.fillStyle = breed.fur;
@@ -74,15 +93,18 @@ export function drawCartoonDog(
     ctx.stroke();
   }
 
-  for (const lx of [-s * 0.28, s * 0.28]) {
+  // Hind paws (slight kick when falling or high effort)
+  const legKick = pose === 'fall' ? Math.sin(animPhase * 24) * s * 0.1 : effort * Math.sin(animPhase * 14) * s * 0.05;
+  for (const side of [-1, 1]) {
     ctx.fillStyle = breed.fur;
     ctx.beginPath();
-    ctx.ellipse(lx, s * 1.05, s * 0.22, s * 0.15, 0, 0, Math.PI * 2);
+    ctx.ellipse(side * s * 0.28, s * 1.05 + side * legKick, s * 0.22, s * 0.15, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = '#0f172a';
     ctx.stroke();
   }
 
+  // Collar / Bandana
   ctx.fillStyle = collarHex;
   if (accessory === 'bandana') {
     ctx.beginPath();
@@ -106,8 +128,14 @@ export function drawCartoonDog(
     ctx.stroke();
   }
 
+  // Ears with floppy/perk physics
+  const earFlop = Math.sin(animPhase * 7) * (0.06 + effort * 0.12) + swingVel * 0.22;
   if (breed.earStyle === 'pointy') {
     for (const side of [-1, 1]) {
+      ctx.save();
+      ctx.translate(side * s * 0.45, -s * 0.62);
+      ctx.rotate(earFlop * 0.45);
+      ctx.translate(-side * s * 0.45, s * 0.62);
       ctx.fillStyle = breed.ear;
       ctx.beginPath();
       ctx.moveTo(side * s * 0.25, -s * 0.62);
@@ -117,12 +145,13 @@ export function drawCartoonDog(
       ctx.fill();
       ctx.strokeStyle = '#0f172a';
       ctx.stroke();
+      ctx.restore();
     }
   } else {
     for (const side of [-1, 1]) {
       ctx.save();
       ctx.translate(side * s * 0.56, -s * 0.36);
-      ctx.rotate(side * 0.28);
+      ctx.rotate(side * (0.28 + effort * 0.18) + earFlop);
       ctx.fillStyle = breed.ear;
       ctx.beginPath();
       ctx.ellipse(0, s * 0.18, s * 0.2, s * 0.36, 0, 0, Math.PI * 2);
@@ -133,12 +162,19 @@ export function drawCartoonDog(
     }
   }
 
+  // Head
   ctx.fillStyle = breed.fur;
   ctx.beginPath();
   ctx.arc(0, -s * 0.36, s * 0.54, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = '#0f172a';
   ctx.stroke();
+
+  // Head sheen
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+  ctx.beginPath();
+  ctx.ellipse(-s * 0.15, -s * 0.64, s * 0.2, s * 0.1, -0.35, 0, Math.PI * 2);
+  ctx.fill();
 
   if (breed.spotted) {
     ctx.fillStyle = '#1e293b';
@@ -147,21 +183,26 @@ export function drawCartoonDog(
     ctx.fill();
   }
 
+  // Snout
   ctx.fillStyle = breed.snout;
   ctx.beginPath();
   ctx.ellipse(0, -s * 0.22, s * 0.28, s * 0.2, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // Panting tongue (bobs faster as hang time / effort increases)
+  const pantBob = pose === 'hang' ? Math.abs(Math.sin(animPhase * (5 + effort * 8))) * s * (0.04 + effort * 0.06) : 0;
   ctx.fillStyle = '#fb7185';
   ctx.beginPath();
-  ctx.ellipse(s * 0.06, -s * 0.05, s * 0.08, s * 0.11, 0, 0, Math.PI * 2);
+  ctx.ellipse(s * 0.06, -s * 0.05 + pantBob * 0.5, s * 0.08, s * 0.11 + pantBob * 0.5, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // Nose
   ctx.fillStyle = '#0f172a';
   ctx.beginPath();
   ctx.ellipse(0, -s * 0.28, s * 0.12, s * 0.08, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  // Eyes
   for (const side of [-1, 1]) {
     ctx.fillStyle = '#0f172a';
     ctx.beginPath();
