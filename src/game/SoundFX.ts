@@ -65,6 +65,39 @@ class SoundFXManager {
       osc.stop(now + i * 0.06 + 0.15);
     });
   }
+
+  public playFrisbeeCatch(): void {
+    const ctx = this.ensureCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    // Cheerful playful bark
+    const bark = ctx.createOscillator();
+    const barkGain = ctx.createGain();
+    bark.type = 'sawtooth';
+    bark.frequency.setValueAtTime(340, now);
+    bark.frequency.exponentialRampToValueAtTime(520, now + 0.05);
+    bark.frequency.exponentialRampToValueAtTime(240, now + 0.12);
+    barkGain.gain.setValueAtTime(0.11, now);
+    barkGain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    bark.connect(barkGain);
+    barkGain.connect(ctx.destination);
+    bark.start(now);
+    bark.stop(now + 0.14);
+
+    // Sparkling chime arpeggio
+    [659, 880, 1046].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + 0.05 + i * 0.055);
+      gain.gain.setValueAtTime(0.12, now + 0.05 + i * 0.055);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05 + i * 0.055 + 0.16);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + 0.05 + i * 0.055);
+      osc.stop(now + 0.05 + i * 0.055 + 0.17);
+    });
+  }
 }
 
 export const soundFX = new SoundFXManager();

@@ -25,6 +25,7 @@ type ScreenName = 'home' | 'options' | 'game' | 'highscores';
 type HsMode = 'global' | 'local';
 
 let state: DogHangerState;
+let activeScreen: ScreenName = 'home';
 let hsMode: HsMode = 'global';
 let optionsFromPlay = false;
 let stage: DogHangerStage | null = null;
@@ -33,6 +34,7 @@ let hsPollInterval: number | null = null;
 let lastMilestone = 0;
 let hsHeadingTapCount = 0;
 let hsHeadingTapTimer: number | null = null;
+let confirmQuitArmed = false;
 
 function renderDogThumb(
   canvas: HTMLCanvasElement,
@@ -46,7 +48,8 @@ function renderDogThumb(
   canvas.height = size * dpr;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size, size);
   drawCartoonDog(ctx, size / 2, size * 0.44, size * 0.24, {
     breed: getDogBreed(breedId),
     collarColor,
@@ -55,20 +58,69 @@ function renderDogThumb(
   });
 }
 
+function syncSoundButtons(): void {
+  const homeBtn = document.getElementById('btn-home-sound');
+  if (homeBtn) homeBtn.textContent = state.soundEnabled ? '🔊' : '🔇';
+  const gameBtn = document.getElementById('btn-game-sound');
+  if (gameBtn) gameBtn.textContent = state.soundEnabled ? '🔊' : '🔇';
+}
+
+function toggleSound(): void {
+  state.soundEnabled = !state.soundEnabled;
+  soundFX.enabled = state.soundEnabled;
+  saveDogHangerState(state);
+  syncSoundButtons();
+}
+
+function openPauseModal(): void {
+  if (!stage || stage.isFinished()) return;
+  stage.setPaused(true);
+  confirmQuitArmed = false;
+  const quitBtn = document.getElementById('btn-pause-quit')!;
+  quitBtn.textContent = '🚪 Quit to Menu';
+  quitBtn.classList.remove('armed');
+  document.getElementById('pause-modal')?.classList.remove('hidden');
+}
+
+function closePauseModal(resume = true): void {
+  document.getElementById('pause-modal')?.classList.add('hidden');
+  confirmQuitArmed = false;
+  const quitBtn = document.getElementById('btn-pause-quit');
+  if (quitBtn) {
+    quitBtn.textContent = '🚪 Quit to Menu';
+    quitBtn.classList.remove('armed');
+  }
+  if (resume && stage && !stage.isFinished()) {
+    stage.setPaused(false);
+    const statusEl = document.getElementById('timer-status');
+    if (statusEl && statusEl.textContent !== 'Tap and hold your dog to start!') {
+      statusEl.textContent = 'Tap & hold dog to resume!';
+    }
+  }
+}
+
 function buildApp(): void {
   const app = document.getElementById('app')!;
   app.innerHTML = `
     <section id="screen-home" class="screen home-screen">
-      <div class="home-hero">
-        <canvas id="home-dog-canvas" class="dog-preview-canvas"></canvas>
-        <h1 class="game-title">Dog Hanger</h1>
-        <p class="game-subtitle">Hold on and don't splash!</p>
-        <div id="home-best-pill" class="best-pill hidden"></div>
+      <div class="home-topbar">
+        <button id="btn-home-more" class="btn btn-small">✨ More Games</button>
+        <button id="btn-home-sound" class="btn btn-small" aria-label="Toggle sound">🔊</button>
       </div>
-      <div class="home-actions">
-        <button id="btn-home-play" class="btn btn-primary">Play</button>
-        <button id="btn-home-options" class="btn btn-secondary">Dog Style</button>
-        <button id="btn-home-highscores" class="btn btn-secondary">Leaderboard</button>
+      <div class="home-content">
+        <div class="home-hero">
+          <canvas id="home-dog-canvas" class="dog-preview-canvas"></canvas>
+          <h1 class="game-title">Dog Hanger</h1>
+          <p class="game-subtitle">Hold on tight & catch flying frisbees to refill grip!</p>
+          <div id="home-best-pill" class="best-pill hidden"></div>
+        </div>
+        <div class="home-actions">
+          <button id="btn-home-play" class="btn btn-primary">▶ Play</button>
+          <div class="home-secondary-row">
+            <button id="btn-home-options" class="btn btn-secondary">🐶 Breeds</button>
+            <button id="btn-home-highscores" class="btn btn-secondary">🏆 Ranks</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -84,7 +136,7 @@ function buildApp(): void {
           <input id="player-name-input" class="name-input" type="text" maxlength="20" placeholder="Player" />
         </div>
         <div>
-          <p class="section-label">Dog Breed</p>
+          <p class="section-label">Dog Breed (10 Breeds)</p>
           <div id="dog-breed-grid" class="breed-grid"></div>
         </div>
         <div>
@@ -100,24 +152,29 @@ function buildApp(): void {
     </section>
 
     <section id="screen-game" class="screen game-screen hidden">
-      <div class="game-top-bar">
-        <button id="btn-game-menu" class="btn btn-small">← Menu</button>
-        <div style="display:flex;gap:8px;">
-          <button id="btn-game-options" class="btn btn-small">Dog Style</button>
-          <button id="btn-game-sound" class="btn btn-small">🔊 On</button>
+      <div class="game-hud-bar">
+        <button id="btn-game-pause" class="btn btn-small" aria-label="Pause">⏸ Pause</button>
+        <div class="hud-center">
+          <div class="timer-pill">
+            <span id="timer-value" class="timer-value">0.00 s</span>
+            <span id="bonus-badge" class="bonus-badge hidden">🥏 0</span>
+          </div>
+          <div id="timer-status" class="timer-sub">Tap and hold your dog to start!</div>
+        </div>
+        <div class="hud-right-group">
+          <button id="btn-game-sound" class="btn btn-small" aria-label="Toggle sound">🔊</button>
         </div>
       </div>
-      <div class="timer-hud">
-        <div id="timer-value" class="timer-value">0.00 s</div>
-        <div id="timer-status" class="timer-sub">Tap and hold your dog to start!</div>
-      </div>
-      <canvas id="game-canvas" class="game-canvas"></canvas>
-      <div id="round-banner" class="round-banner hidden">
-        <div id="round-banner-text" style="font-weight:800;font-size:1.05rem;">Splash!</div>
-        <button id="btn-retry" class="btn btn-primary" style="padding:12px;">Try Again</button>
-        <div class="round-banner-actions">
-          <button id="btn-banner-hs" class="btn btn-small">Leaderboard</button>
-          <button id="btn-banner-menu" class="btn btn-small">Menu</button>
+      <div class="game-canvas-wrap">
+        <canvas id="game-canvas" class="game-canvas"></canvas>
+        <div id="round-banner" class="round-banner hidden">
+          <div id="round-banner-text" style="font-weight:800;font-size:1.05rem;">Splash!</div>
+          <div id="round-banner-sub" style="font-size:0.84rem;color:var(--muted);"></div>
+          <button id="btn-retry" class="btn btn-primary" style="padding:12px;">Try Again</button>
+          <div class="round-banner-actions">
+            <button id="btn-banner-hs" class="btn btn-small">🏆 Ranks</button>
+            <button id="btn-banner-menu" class="btn btn-small">🏠 Menu</button>
+          </div>
         </div>
       </div>
     </section>
@@ -144,10 +201,59 @@ function buildApp(): void {
       </div>
       <div id="hs-list" class="hs-list"></div>
     </section>
+
+    <div id="pause-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <h3 class="modal-title">⏸ Paused</h3>
+        <p class="modal-sub">Catch your breath before the next frisbee flies by.</p>
+        <button id="btn-pause-resume" class="btn btn-primary" style="padding:13px;">▶ Resume</button>
+        <button id="btn-pause-options" class="btn btn-secondary">🐶 Dog Style</button>
+        <button id="btn-pause-restart" class="btn btn-secondary">↻ Restart Run</button>
+        <button id="btn-pause-quit" class="btn btn-danger">🚪 Quit to Menu</button>
+      </div>
+    </div>
+
+    <div id="more-games-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <h3 class="modal-title">✨ More Games by VaelNTN</h3>
+        <p class="modal-sub">Handcrafted arcade games from VaelNTN Studios.</p>
+        <div class="more-games-list">
+          <a class="more-game-item featured" href="https://github.com/VaelNTN/starforge-survivors/releases/latest" target="_blank" rel="noopener noreferrer">
+            <div>
+              <div class="more-game-name">⭐ Starforge Survivors</div>
+              <div class="more-game-desc">Flagship sci-fi roguelite — 6 heroes, 6 bosses & zero ads</div>
+            </div>
+            <span class="more-game-badge">FLAGSHIP</span>
+          </a>
+          <a class="more-game-item" href="https://github.com/VaelNTN/dog-climber/releases/latest" target="_blank" rel="noopener noreferrer">
+            <div>
+              <div class="more-game-name">🐕 Dog Climber</div>
+              <div class="more-game-desc">Climb past branches, grab Golden Bones & dodge pinecones</div>
+            </div>
+          </a>
+          <a class="more-game-item" href="https://github.com/VaelNTN/cat-hanger/releases/latest" target="_blank" rel="noopener noreferrer">
+            <div>
+              <div class="more-game-name">🐱 Cat Hanger</div>
+              <div class="more-game-desc">Hang tight through sunset wind gusts & rhythmic treat boosts</div>
+            </div>
+          </a>
+          <a class="more-game-item" href="https://github.com/VaelNTN/cat-climber/releases/latest" target="_blank" rel="noopener noreferrer">
+            <div>
+              <div class="more-game-name">🐈 Cat Climber</div>
+              <div class="more-game-desc">Race up the sky vine with fish treats & fever climbs</div>
+            </div>
+          </a>
+        </div>
+        <button id="btn-more-close" class="btn btn-secondary" style="padding:11px;">Close</button>
+      </div>
+    </div>
   `;
 }
 
 function showScreen(name: ScreenName): void {
+  activeScreen = name;
+  closePauseModal(false);
+  document.getElementById('more-games-modal')?.classList.add('hidden');
   document.querySelectorAll('.screen').forEach((el) => el.classList.add('hidden'));
   document.getElementById(`screen-${name}`)?.classList.remove('hidden');
 
@@ -170,6 +276,7 @@ function showScreen(name: ScreenName): void {
 
 function startHomePreview(): void {
   stopHomePreview();
+  syncSoundButtons();
   const canvas = document.getElementById('home-dog-canvas') as HTMLCanvasElement;
   const pill = document.getElementById('home-best-pill')!;
   if (state.bestTimeSec > 0) {
@@ -225,7 +332,7 @@ function renderOptions(): void {
     renderDogThumb(cvs, b.id, 48);
     const label = document.createElement('span');
     label.style.fontWeight = '700';
-    label.style.fontSize = '0.9rem';
+    label.style.fontSize = '0.88rem';
     label.textContent = b.name;
     btn.appendChild(cvs);
     btn.appendChild(label);
@@ -266,11 +373,18 @@ function renderOptions(): void {
   }
 }
 
-function startStage(): void {
+function resetGameHud(): void {
   document.getElementById('round-banner')!.classList.add('hidden');
   document.getElementById('timer-value')!.textContent = '0.00 s';
+  const badge = document.getElementById('bonus-badge')!;
+  badge.textContent = '🥏 0';
+  badge.classList.add('hidden');
   document.getElementById('timer-status')!.textContent = 'Tap and hold your dog to start!';
-  document.getElementById('btn-game-sound')!.textContent = state.soundEnabled ? '🔊 On' : '🔇 Off';
+}
+
+function startStage(): void {
+  resetGameHud();
+  syncSoundButtons();
 
   const canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
   if (!stage) {
@@ -282,29 +396,46 @@ function startStage(): void {
           lastMilestone = 0;
           soundFX.playGrab();
           document.getElementById('round-banner')!.classList.add('hidden');
-          document.getElementById('timer-status')!.textContent = "Don't let go!";
+          document.getElementById('timer-status')!.textContent = 'Hold tight! Catch frisbees for grip!';
         },
-        onTick: (sec) => {
+        onTick: (sec, bonusScore, frisbeesCaught) => {
           document.getElementById('timer-value')!.textContent = `${sec.toFixed(2)} s`;
+          const badge = document.getElementById('bonus-badge')!;
+          if (frisbeesCaught > 0) {
+            badge.textContent = `🥏 ${frisbeesCaught} (+${bonusScore})`;
+            badge.classList.remove('hidden');
+          }
           const step = Math.floor(sec / 10);
           if (step > lastMilestone) {
             lastMilestone = step;
             soundFX.playMilestone();
           }
         },
-        onRelease: (sec) => {
+        onFrisbeeCatch: (frisbeesCaught, bonusScore) => {
+          soundFX.playFrisbeeCatch();
+          const badge = document.getElementById('bonus-badge')!;
+          badge.textContent = `🥏 ${frisbeesCaught} (+${bonusScore})`;
+          badge.classList.remove('hidden');
+          document.getElementById('timer-status')!.textContent = 'Nice catch! +30% Grip & +1.5s!';
+        },
+        onRelease: (sec, reason, bonusScore, frisbeesCaught) => {
           soundFX.playSplash();
           const prevBest = state.bestTimeSec;
           const rounded = Math.round(sec * 100) / 100;
           recordDogHangerScore(state, sec);
-          document.getElementById('timer-status')!.textContent = `Splash at ${sec.toFixed(2)} s!`;
+          document.getElementById('timer-status')!.textContent =
+            reason === 'stamina' ? `Grip slipped at ${sec.toFixed(2)} s!` : `Splash at ${sec.toFixed(2)} s!`;
           document.getElementById('round-banner-text')!.textContent =
             rounded > prevBest && rounded > 0
-              ? `New Best: ${sec.toFixed(2)} s!`
+              ? `🏆 New Best: ${sec.toFixed(2)} s!`
               : `Time: ${sec.toFixed(2)} s (Best: ${state.bestTimeSec.toFixed(2)} s)`;
+          document.getElementById('round-banner-sub')!.textContent =
+            frisbeesCaught > 0
+              ? `Frisbees caught: ${frisbeesCaught} (+${bonusScore} bonus pts)`
+              : 'Tip: Catch flying frisbees (2nd finger or Space/F) to refill grip!';
           document.getElementById('round-banner')!.classList.remove('hidden');
           if (state.apiBaseUrl) {
-            submitGlobalDogHangerScore(state.apiBaseUrl, {
+            void submitGlobalDogHangerScore(state.apiBaseUrl, {
               deviceId: state.deviceId,
               playerName: state.playerName.trim() || 'Player',
               timeSec: sec,
@@ -451,6 +582,7 @@ async function init(): Promise<void> {
   soundFX.enabled = state.soundEnabled;
   buildApp();
   renderOptions();
+  syncSoundButtons();
 
   document.getElementById('btn-home-play')!.onclick = () => showScreen('game');
   document.getElementById('btn-home-options')!.onclick = () => {
@@ -459,6 +591,18 @@ async function init(): Promise<void> {
     showScreen('options');
   };
   document.getElementById('btn-home-highscores')!.onclick = () => showScreen('highscores');
+  document.getElementById('btn-home-sound')!.onclick = toggleSound;
+  document.getElementById('btn-home-more')!.onclick = () => {
+    document.getElementById('more-games-modal')?.classList.remove('hidden');
+  };
+  document.getElementById('btn-more-close')!.onclick = () => {
+    document.getElementById('more-games-modal')?.classList.add('hidden');
+  };
+  document.getElementById('more-games-modal')!.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+      document.getElementById('more-games-modal')?.classList.add('hidden');
+    }
+  });
 
   document.getElementById('btn-options-back')!.onclick = () => showScreen(optionsFromPlay ? 'game' : 'home');
   document.getElementById('btn-options-start')!.onclick = () => showScreen('game');
@@ -467,22 +611,40 @@ async function init(): Promise<void> {
     saveDogHangerState(state);
   });
 
-  document.getElementById('btn-game-menu')!.onclick = () => showScreen('home');
-  document.getElementById('btn-game-options')!.onclick = () => {
+  document.getElementById('btn-game-pause')!.onclick = openPauseModal;
+  document.getElementById('btn-game-sound')!.onclick = toggleSound;
+  document.getElementById('btn-pause-resume')!.onclick = () => closePauseModal(true);
+  document.getElementById('btn-pause-options')!.onclick = () => {
     optionsFromPlay = true;
     renderOptions();
     showScreen('options');
   };
-  document.getElementById('btn-game-sound')!.onclick = () => {
-    state.soundEnabled = !state.soundEnabled;
-    soundFX.enabled = state.soundEnabled;
-    saveDogHangerState(state);
-    document.getElementById('btn-game-sound')!.textContent = state.soundEnabled ? '🔊 On' : '🔇 Off';
+  document.getElementById('btn-pause-restart')!.onclick = () => {
+    closePauseModal(false);
+    resetGameHud();
+    stage?.resetRound();
   };
+  document.getElementById('btn-pause-quit')!.onclick = () => {
+    const quitBtn = document.getElementById('btn-pause-quit')!;
+    if (!confirmQuitArmed) {
+      confirmQuitArmed = true;
+      quitBtn.textContent = '⚠️ Confirm Quit?';
+      quitBtn.classList.add('armed');
+    } else {
+      showScreen('home');
+    }
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && activeScreen === 'game') {
+      const modal = document.getElementById('pause-modal');
+      if (modal && !modal.classList.contains('hidden')) closePauseModal(true);
+      else openPauseModal();
+    }
+  });
+
   document.getElementById('btn-retry')!.onclick = () => {
-    document.getElementById('round-banner')!.classList.add('hidden');
-    document.getElementById('timer-value')!.textContent = '0.00 s';
-    document.getElementById('timer-status')!.textContent = 'Tap and hold your dog to start!';
+    resetGameHud();
     stage?.resetRound();
   };
   document.getElementById('btn-banner-hs')!.onclick = () => showScreen('highscores');

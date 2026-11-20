@@ -19,6 +19,10 @@ export const DOG_BREEDS: DogBreed[] = [
   { id: 3, name: 'Dalmatian', fur: '#f8fafc', belly: '#e2e8f0', ear: '#1e293b', snout: '#f1f5f9', earStyle: 'floppy', spotted: true },
   { id: 4, name: 'Choco Lab', fur: '#78350f', belly: '#b45309', ear: '#451a03', snout: '#92400e', earStyle: 'floppy' },
   { id: 5, name: 'Midnight Corgi', fur: '#1e293b', belly: '#fbbf24', ear: '#0f172a', snout: '#fde68a', earStyle: 'pointy' },
+  { id: 6, name: 'Happy Beagle', fur: '#c26d27', belly: '#fffbeb', ear: '#5c2d0c', snout: '#fef3c7', earStyle: 'floppy' },
+  { id: 7, name: 'Blue Merle Aussie', fur: '#94a3b8', belly: '#f1f5f9', ear: '#334155', snout: '#e2e8f0', earStyle: 'floppy', spotted: true },
+  { id: 8, name: 'Fluffy Samoyed', fur: '#f1f5f9', belly: '#ffffff', ear: '#cbd5e1', snout: '#ffffff', earStyle: 'pointy' },
+  { id: 9, name: 'Fawn Frenchie', fur: '#d6a46d', belly: '#fef3c7', ear: '#451a03', snout: '#57534e', earStyle: 'pointy' },
 ];
 
 export const COLLAR_COLORS: { id: CollarColorId; label: string; hex: string }[] = [

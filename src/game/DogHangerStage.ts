@@ -5,8 +5,9 @@ export type DogHangerPhase = 'ready' | 'holding' | 'falling' | 'finished';
 
 export interface DogHangerCallbacks {
   onStartHold: () => void;
-  onTick: (elapsedSeconds: number) => void;
-  onRelease: (elapsedSeconds: number) => void;
+  onTick: (elapsedSeconds: number, bonusScore: number, frisbeesCaught: number) => void;
+  onFrisbeeCatch: (frisbeesCaught: number, bonusScore: number) => void;
+  onRelease: (elapsedSeconds: number, reason: 'release' | 'stamina', bonusScore: number, frisbeesCaught: number) => void;
   onMissTap: () => void;
 }
 
@@ -16,6 +17,15 @@ interface Frisbee {
   vx: number;
   rot: number;
   color: string;
+}
+
+interface FloatingPopup {
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  life: number;
+  maxLife: number;
 }
 
 interface Butterfly {
@@ -62,6 +72,8 @@ export class DogHangerStage {
   private height = 0;
   private dpr = 1;
   private active = false;
+  private paused = false;
+  private resumeHoldPending = false;
   private rafId: number | null = null;
   private lastTime = 0;
 
@@ -69,11 +81,15 @@ export class DogHangerStage {
   private animClock = 0;
   private holdStartMs = 0;
   private holdElapsed = 0;
+  private stamina = 1;
+  private bonusScore = 0;
+  private frisbeesCaught = 0;
   private activePointerId: number | null = null;
   private nextMilestoneSec = 5;
 
   private anchorX = 0;
   private anchorY = 32;
+  private waterHeight = 64;
   private barFlex = 0;
   private ropeLength = 175;
   private swingAngle = 0;
@@ -91,7 +107,8 @@ export class DogHangerStage {
   private hasSplashed = false;
 
   private frisbees: Frisbee[] = [];
-  private nextFrisbeeAt = 3;
+  private nextFrisbeeAt = 2.2;
+  private popups: FloatingPopup[] = [];
   private butterflies: Butterfly[] = [];
   private particles: Particle[] = [];
   private milestones: MilestoneBurst[] = [];
@@ -114,6 +131,7 @@ export class DogHangerStage {
     this.handleResize = this.handleResize.bind(this);
     this.onPointerDown = this.onPointerDown.bind(this);
     this.onPointerUp = this.onPointerUp.bind(this);
+    this.onKeyDown = this.onKeyDown.bind(this);
     this.onContextMenu = this.onContextMenu.bind(this);
     this.onBlurOrHide = this.onBlurOrHide.bind(this);
     this.loop = this.loop.bind(this);
@@ -138,10 +156,37 @@ export class DogHangerStage {
     this.accessory = opts.accessory;
   }
 
+  public isPaused(): boolean {
+    return this.paused;
+  }
+
+  public isFinished(): boolean {
+    return this.phase === 'falling' || this.phase === 'finished';
+  }
+
+  public setPaused(next: boolean): void {
+    if (this.paused === next) return;
+    this.paused = next;
+    if (next) {
+      if (this.phase === 'holding') {
+        this.releasePointerCaptureSafe();
+        this.activePointerId = null;
+        this.resumeHoldPending = true;
+      }
+    } else {
+      this.lastTime = performance.now();
+    }
+  }
+
   public resetRound(): void {
     this.releasePointerCaptureSafe();
+    this.paused = false;
+    this.resumeHoldPending = false;
     this.phase = 'ready';
     this.holdElapsed = 0;
+    this.stamina = 1;
+    this.bonusScore = 0;
+    this.frisbeesCaught = 0;
     this.nextMilestoneSec = 5;
     this.barFlex = 0;
     this.swingAngle = 0;
@@ -154,10 +199,11 @@ export class DogHangerStage {
     this.hasSplashed = false;
     this.activePointerId = null;
     this.frisbees = [];
+    this.popups = [];
     this.particles = [];
     this.milestones = [];
     this.sweatTimer = 0;
-    this.nextFrisbeeAt = 3;
+    this.nextFrisbeeAt = 2.2;
     this.updateDogPos();
   }
 
@@ -170,6 +216,7 @@ export class DogHangerStage {
     this.canvas.addEventListener('contextmenu', this.onContextMenu);
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('pointercancel', this.onPointerUp);
+    window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('blur', this.onBlurOrHide);
     document.addEventListener('visibilitychange', this.onBlurOrHide);
     this.lastTime = performance.now();
@@ -178,6 +225,8 @@ export class DogHangerStage {
 
   public stop(): void {
     this.active = false;
+    this.paused = false;
+    this.resumeHoldPending = false;
     this.releasePointerCaptureSafe();
     this.activePointerId = null;
     if (this.phase === 'holding') {
@@ -188,6 +237,7 @@ export class DogHangerStage {
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointercancel', this.onPointerUp);
+    window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('blur', this.onBlurOrHide);
     document.removeEventListener('visibilitychange', this.onBlurOrHide);
     if (this.rafId !== null) {
@@ -214,8 +264,8 @@ export class DogHangerStage {
 
   private onBlurOrHide(): void {
     if (document.hidden || !document.hasFocus()) {
-      if (this.phase === 'holding') {
-        this.finishHold();
+      if (this.phase === 'holding' && !this.paused && !this.resumeHoldPending) {
+        this.finishHold('release');
       }
     }
   }
@@ -228,10 +278,12 @@ export class DogHangerStage {
     this.height = rect.height;
     this.canvas.width = Math.round(rect.width * this.dpr);
     this.canvas.height = Math.round(rect.height * this.dpr);
+    this.waterHeight = Math.min(68, Math.max(38, this.height * 0.14));
     this.anchorX = this.width / 2;
-    this.anchorY = Math.max(54, this.height * 0.12);
-    this.dogSize = Math.max(27, Math.min(36, Math.min(this.width, this.height) * 0.085));
-    this.ropeLength = Math.min(210, Math.max(125, this.height * 0.34));
+    this.anchorY = Math.max(28, Math.min(48, this.height * 0.095));
+    const usableH = Math.max(120, this.height - this.waterHeight - this.anchorY);
+    this.dogSize = Math.max(22, Math.min(35, Math.min(this.width * 0.09, usableH * 0.13)));
+    this.ropeLength = Math.min(195, Math.max(66, usableH * 0.43));
     if (this.phase === 'ready' || this.phase === 'holding') this.updateDogPos();
   }
 
@@ -240,14 +292,102 @@ export class DogHangerStage {
     this.dogY = this.anchorY + this.barFlex + Math.cos(this.swingAngle) * this.ropeLength;
   }
 
+  private catchFrisbeeAt(index: number): void {
+    const f = this.frisbees[index];
+    if (!f) return;
+    this.frisbees.splice(index, 1);
+    this.stamina = Math.min(1, this.stamina + 0.3);
+    this.frisbeesCaught += 1;
+    this.bonusScore += 100;
+    this.holdElapsed += 1.5;
+    this.spawnSparkles(f.x, f.y, 16);
+    this.popups.push({
+      x: Math.max(70, Math.min(this.width - 70, f.x)),
+      y: f.y - 10,
+      text: '+1.5s • +30% GRIP!',
+      color: '#fde047',
+      life: 1.15,
+      maxLife: 1.15,
+    });
+    this.callbacks.onFrisbeeCatch(this.frisbeesCaught, this.bonusScore);
+    this.callbacks.onTick(this.holdElapsed, this.bonusScore, this.frisbeesCaught);
+  }
+
+  private tryCatchNearestFrisbee(px?: number, py?: number): boolean {
+    if (this.phase !== 'holding' || this.paused || this.resumeHoldPending) return false;
+    if (this.frisbees.length === 0) return false;
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < this.frisbees.length; i++) {
+      const f = this.frisbees[i];
+      if (f.x < -10 || f.x > this.width + 10) continue;
+      if (px !== undefined && py !== undefined) {
+        const d = Math.hypot(px - f.x, py - f.y);
+        if (d <= 86 && d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      } else {
+        const d = Math.abs(f.x - this.dogX);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+    }
+    if (bestIdx >= 0) {
+      this.catchFrisbeeAt(bestIdx);
+      return true;
+    }
+    return false;
+  }
+
+  private onKeyDown(ev: KeyboardEvent): void {
+    if (this.paused) return;
+    if (ev.code === 'Space' || ev.code === 'KeyF') {
+      if (this.phase === 'holding' && !this.resumeHoldPending) {
+        ev.preventDefault();
+        this.tryCatchNearestFrisbee();
+      }
+    }
+  }
+
   private onPointerDown(ev: PointerEvent): void {
     ev.preventDefault();
+    if (this.paused) return;
     if (ev.pointerType === 'mouse' && ev.button !== 0) return;
-    if (this.phase !== 'ready' || this.activePointerId !== null) return;
+
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const px = ev.clientX - rect.left;
     const py = ev.clientY - rect.top;
+
+    // Multi-touch frisbee catch while already holding the dog
+    if (this.phase === 'holding' && !this.resumeHoldPending && this.activePointerId !== null && ev.pointerId !== this.activePointerId) {
+      this.tryCatchNearestFrisbee(px, py);
+      return;
+    }
+
+    // Resuming hold after pause
+    if (this.phase === 'holding' && this.resumeHoldPending && this.activePointerId === null) {
+      const dist = Math.hypot(px - this.dogX, py - this.dogY);
+      if (dist <= 95) {
+        this.activePointerId = ev.pointerId;
+        this.resumeHoldPending = false;
+        try {
+          this.canvas.setPointerCapture(ev.pointerId);
+        } catch {
+          // Ignore
+        }
+        this.spawnSparkles(this.dogX, this.dogY - 10, 6);
+        this.callbacks.onStartHold();
+      } else {
+        this.callbacks.onMissTap();
+      }
+      return;
+    }
+
+    if (this.phase !== 'ready' || this.activePointerId !== null) return;
     const dist = Math.hypot(px - this.dogX, py - this.dogY);
     if (dist <= 95) {
       this.activePointerId = ev.pointerId;
@@ -259,7 +399,11 @@ export class DogHangerStage {
       this.phase = 'holding';
       this.holdStartMs = performance.now();
       this.holdElapsed = 0;
+      this.stamina = 1;
+      this.bonusScore = 0;
+      this.frisbeesCaught = 0;
       this.nextMilestoneSec = 5;
+      this.nextFrisbeeAt = 2.2;
       this.hasSplashed = false;
       this.spawnSparkles(this.dogX, this.dogY - 12, 8);
       this.callbacks.onStartHold();
@@ -269,14 +413,16 @@ export class DogHangerStage {
   }
 
   private onPointerUp(ev: PointerEvent): void {
+    if (this.paused || this.resumeHoldPending) return;
     if (this.phase !== 'holding') return;
     if (this.activePointerId !== null && ev.pointerId !== this.activePointerId) return;
-    this.finishHold();
+    this.finishHold('release');
   }
 
-  private finishHold(): void {
+  private finishHold(reason: 'release' | 'stamina'): void {
     this.releasePointerCaptureSafe();
     this.activePointerId = null;
+    this.resumeHoldPending = false;
     const fallback = Math.min(0.05, Math.max(0.01, (performance.now() - this.holdStartMs) / 1000));
     this.holdElapsed = Math.max(0.01, this.holdElapsed > 0 ? this.holdElapsed : fallback);
     this.phase = 'falling';
@@ -284,7 +430,7 @@ export class DogHangerStage {
     this.fallVy = 45;
     this.fallSpin = (this.fallVx >= 0 ? 1 : -1) * 4.8;
     this.spawnSparkles(this.dogX, this.dogY, 12);
-    this.callbacks.onRelease(this.holdElapsed);
+    this.callbacks.onRelease(this.holdElapsed, reason, this.bonusScore, this.frisbeesCaught);
   }
 
   private spawnSparkles(x: number, y: number, count: number): void {
@@ -368,114 +514,129 @@ export class DogHangerStage {
     if (!this.active) return;
     const dt = Math.min(0.05, Math.max(0.001, (now - this.lastTime) / 1000));
     this.lastTime = now;
-    this.animClock += dt;
 
-    this.prevSwingAngle = this.swingAngle;
+    if (!this.paused) {
+      this.animClock += dt;
+      this.prevSwingAngle = this.swingAngle;
 
-    if (this.phase === 'holding') {
-      this.holdElapsed += dt;
-      this.callbacks.onTick(this.holdElapsed);
+      if (this.phase === 'holding' && !this.resumeHoldPending) {
+        this.holdElapsed += dt;
+        const drainRate = 0.044 + Math.min(0.036, this.holdElapsed * 0.0013);
+        this.stamina = Math.max(0, this.stamina - drainRate * dt);
+        this.callbacks.onTick(this.holdElapsed, this.bonusScore, this.frisbeesCaught);
 
-      while (this.holdElapsed >= this.nextMilestoneSec) {
-        this.triggerMilestone(this.nextMilestoneSec);
-        this.nextMilestoneSec += 5;
-      }
+        if (this.stamina <= 0) {
+          this.finishHold('stamina');
+        } else {
+          while (this.holdElapsed >= this.nextMilestoneSec) {
+            this.triggerMilestone(this.nextMilestoneSec);
+            this.nextMilestoneSec += 5;
+          }
 
-      const difficulty = 1 + Math.min(2.2, this.holdElapsed / 18);
-      this.swingPhase += dt * (1.85 + difficulty * 0.48);
-      const maxAmp = Math.min(0.45, 0.14 + this.holdElapsed * 0.009);
-      this.swingAngle = Math.sin(this.swingPhase) * maxAmp;
-      this.barFlex += (6 + Math.min(5, this.holdElapsed * 0.15) - this.barFlex) * Math.min(1, dt * 10);
-      this.updateDogPos();
+          const difficulty = 1 + Math.min(2.2, this.holdElapsed / 18);
+          this.swingPhase += dt * (1.85 + difficulty * 0.48);
+          const maxAmp = Math.min(0.45, 0.14 + this.holdElapsed * 0.009);
+          this.swingAngle = Math.sin(this.swingPhase) * maxAmp;
+          this.barFlex += (6 + Math.min(5, this.holdElapsed * 0.15) - this.barFlex) * Math.min(1, dt * 10);
+          this.updateDogPos();
 
-      if (this.holdElapsed >= 4) {
-        this.sweatTimer -= dt;
-        if (this.sweatTimer <= 0) {
-          this.spawnSweatDrop();
-          this.sweatTimer = Math.max(0.22, 0.72 - this.holdElapsed * 0.02);
+          if (this.holdElapsed >= 3 || this.stamina < 0.45) {
+            this.sweatTimer -= dt;
+            if (this.sweatTimer <= 0) {
+              this.spawnSweatDrop();
+              this.sweatTimer = Math.max(0.18, 0.65 - (1 - this.stamina) * 0.4);
+            }
+          }
+
+          if (this.holdElapsed >= this.nextFrisbeeAt) {
+            this.nextFrisbeeAt = this.holdElapsed + Math.max(2.4, 4.2 - this.holdElapsed * 0.03);
+            const fromLeft = Math.random() > 0.5;
+            const frisbeeColors = ['#f43f5e', '#f59e0b', '#06b6d4', '#a855f7'];
+            const waterY = this.height - this.waterHeight;
+            const minY = this.anchorY + 42;
+            const maxY = Math.max(minY + 20, waterY - 48);
+            this.frisbees.push({
+              x: fromLeft ? -28 : this.width + 28,
+              y: minY + Math.random() * (maxY - minY),
+              vx: (fromLeft ? 1 : -1) * (125 + Math.random() * 75),
+              rot: 0,
+              color: frisbeeColors[Math.floor(Math.random() * frisbeeColors.length)],
+            });
+          }
         }
-      }
-
-      if (this.holdElapsed >= this.nextFrisbeeAt) {
-        this.nextFrisbeeAt += Math.max(1.8, 4 - this.holdElapsed * 0.04);
-        const fromLeft = Math.random() > 0.5;
-        const frisbeeColors = ['#f43f5e', '#f59e0b', '#06b6d4', '#a855f7'];
-        this.frisbees.push({
-          x: fromLeft ? -30 : this.width + 30,
-          y: this.anchorY + this.ropeLength * (0.4 + Math.random() * 0.5),
-          vx: (fromLeft ? 1 : -1) * (170 + Math.random() * 110),
-          rot: 0,
-          color: frisbeeColors[Math.floor(Math.random() * frisbeeColors.length)],
-        });
-      }
-    } else if (this.phase === 'ready') {
-      this.swingAngle = Math.sin(this.animClock * 1.6) * 0.06;
-      this.barFlex += (3 - this.barFlex) * Math.min(1, dt * 8);
-      this.updateDogPos();
-    } else if (this.phase === 'falling') {
-      this.fallVy += 960 * dt;
-      this.dogX += this.fallVx * dt;
-      this.dogY += this.fallVy * dt;
-      this.fallRot += this.fallSpin * dt;
-      this.barFlex += (0 - this.barFlex) * Math.min(1, dt * 12);
-      const waterY = this.height - 70;
-      if (!this.hasSplashed && this.dogY >= waterY - 8) {
-        this.hasSplashed = true;
-        this.spawnPoolSplash(this.dogX, waterY);
-      }
-      if (this.dogY > this.height + 24) {
-        this.phase = 'finished';
-      }
-    } else {
-      this.barFlex += (0 - this.barFlex) * Math.min(1, dt * 10);
-    }
-
-    this.swingVel = Math.max(-1.5, Math.min(1.5, (this.swingAngle - this.prevSwingAngle) / dt));
-
-    this.frisbees = this.frisbees.filter((f) => {
-      f.x += f.vx * dt;
-      f.rot += dt * 9;
-      return f.x > -60 && f.x < this.width + 60;
-    });
-
-    // Butterflies fluttering across the park
-    for (const b of this.butterflies) {
-      b.x += b.vx * dt;
-      b.y += Math.sin(this.animClock * 3 + b.phase) * 18 * dt;
-      if (b.x > this.width + 25) b.x = -25;
-      if (b.x < -25) b.x = this.width + 25;
-    }
-
-    // Particles
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.life -= dt;
-      if (p.life <= 0) {
-        this.particles.splice(i, 1);
-        continue;
-      }
-      if (p.kind === 'splash' || p.kind === 'sweat') {
-        p.vy += 520 * dt;
-      } else if (p.kind === 'ripple') {
-        p.size += 85 * dt;
+      } else if (this.phase === 'ready' || this.resumeHoldPending) {
+        this.swingAngle = Math.sin(this.animClock * 1.6) * 0.06;
+        this.barFlex += (3 - this.barFlex) * Math.min(1, dt * 8);
+        this.updateDogPos();
+      } else if (this.phase === 'falling') {
+        this.fallVy += 960 * dt;
+        this.dogX += this.fallVx * dt;
+        this.dogY += this.fallVy * dt;
+        this.fallRot += this.fallSpin * dt;
+        this.barFlex += (0 - this.barFlex) * Math.min(1, dt * 12);
+        const waterY = this.height - this.waterHeight;
+        if (!this.hasSplashed && this.dogY >= waterY - 8) {
+          this.hasSplashed = true;
+          this.spawnPoolSplash(this.dogX, waterY);
+        }
+        if (this.dogY > this.height + 24) {
+          this.phase = 'finished';
+        }
       } else {
-        p.vx *= Math.pow(0.25, dt);
-        p.vy += 200 * dt;
+        this.barFlex += (0 - this.barFlex) * Math.min(1, dt * 10);
       }
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-    }
 
-    // Milestone rings
-    for (let i = this.milestones.length - 1; i >= 0; i--) {
-      const m = this.milestones[i];
-      m.life -= dt;
-      if (m.life <= 0) {
-        this.milestones.splice(i, 1);
-        continue;
+      this.swingVel = Math.max(-1.5, Math.min(1.5, (this.swingAngle - this.prevSwingAngle) / dt));
+
+      this.frisbees = this.frisbees.filter((f) => {
+        f.x += f.vx * dt;
+        f.rot += dt * 9;
+        return f.x > -60 && f.x < this.width + 60;
+      });
+
+      for (let i = this.popups.length - 1; i >= 0; i--) {
+        const pop = this.popups[i];
+        pop.life -= dt;
+        pop.y -= 36 * dt;
+        if (pop.life <= 0) this.popups.splice(i, 1);
       }
-      const prog = 1 - m.life / m.maxLife;
-      m.radius = 26 + (m.maxRadius - 26) * (1 - Math.pow(1 - prog, 2));
+
+      for (const b of this.butterflies) {
+        b.x += b.vx * dt;
+        b.y += Math.sin(this.animClock * 3 + b.phase) * 18 * dt;
+        if (b.x > this.width + 25) b.x = -25;
+        if (b.x < -25) b.x = this.width + 25;
+      }
+
+      for (let i = this.particles.length - 1; i >= 0; i--) {
+        const p = this.particles[i];
+        p.life -= dt;
+        if (p.life <= 0) {
+          this.particles.splice(i, 1);
+          continue;
+        }
+        if (p.kind === 'splash' || p.kind === 'sweat') {
+          p.vy += 520 * dt;
+        } else if (p.kind === 'ripple') {
+          p.size += 85 * dt;
+        } else {
+          p.vx *= Math.pow(0.25, dt);
+          p.vy += 200 * dt;
+        }
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+      }
+
+      for (let i = this.milestones.length - 1; i >= 0; i--) {
+        const m = this.milestones[i];
+        m.life -= dt;
+        if (m.life <= 0) {
+          this.milestones.splice(i, 1);
+          continue;
+        }
+        const prog = 1 - m.life / m.maxLife;
+        m.radius = 26 + (m.maxRadius - 26) * (1 - Math.pow(1 - prog, 2));
+      }
     }
 
     this.draw();
@@ -489,14 +650,15 @@ export class DogHangerStage {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
 
-    this.drawSunnyParkBackdrop(ctx, width, height);
-
-    // Sparkling water pool at bottom with waves & sunlight glints
-    const waterY = height - 70;
+    const waterY = height - this.waterHeight;
+    this.drawSunnyParkBackdrop(ctx, width, height, waterY);
     this.drawSparklingPool(ctx, width, height, waterY);
-
-    // Sturdy wooden/golden park bar across top
     this.drawParkBar(ctx, width);
+
+    // Grip stamina meter cleanly positioned beneath the park bar (left corner so never hits rope)
+    if (this.phase === 'holding') {
+      this.drawStaminaMeter(ctx, width);
+    }
 
     // Chew rope + knot + bone handle
     const clampedAnchorY = this.anchorY + this.barFlex * 0.65;
@@ -538,11 +700,18 @@ export class DogHangerStage {
       }
     }
 
-    // Flying frisbees with motion trail
+    // Flying catchable frisbees with glowing aura & motion trail
     for (const f of this.frisbees) {
       ctx.save();
+      const pulse = 0.5 + 0.5 * Math.sin(this.animClock * 10);
+      ctx.strokeStyle = `rgba(253, 224, 71, ${0.45 + pulse * 0.45})`;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, 28 + pulse * 5, 0, Math.PI * 2);
+      ctx.stroke();
+
       const dir = f.vx > 0 ? -1 : 1;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(f.x + dir * 20, f.y - 3);
@@ -555,15 +724,38 @@ export class DogHangerStage {
       ctx.rotate(Math.sin(f.rot) * 0.25);
       ctx.fillStyle = f.color;
       ctx.beginPath();
-      ctx.ellipse(0, 0, 23, 8.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, 24, 9, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.2;
       ctx.stroke();
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
       ctx.beginPath();
       ctx.ellipse(-4, -2.5, 11, 2.5, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
+    }
+
+    // Frisbee prompt badge when one is active
+    if (this.phase === 'holding' && !this.resumeHoldPending && this.frisbees.length > 0) {
+      const label = '🥏 Tap Frisbee / [Space]!';
+      ctx.save();
+      ctx.font = '800 12px system-ui, -apple-system, sans-serif';
+      const tw = ctx.measureText(label).width;
+      const bw = tw + 20;
+      const bx = width - bw - 12;
+      const by = this.anchorY + 14;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.8)';
+      ctx.strokeStyle = '#fde047';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, 24, 12);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fef08a';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, bx + bw / 2, by + 12);
       ctx.restore();
     }
 
@@ -588,8 +780,11 @@ export class DogHangerStage {
 
     // Dog
     if (this.phase !== 'finished') {
-      const effort = this.phase === 'holding' ? Math.min(1, this.holdElapsed / 14) : 0;
-      const shake = this.phase === 'holding' && this.holdElapsed > 5 ? Math.min(2.6, (this.holdElapsed - 5) * 0.22) : 0;
+      const effort = this.phase === 'holding' ? Math.max(Math.min(1, this.holdElapsed / 14), 1 - this.stamina) : 0;
+      const shake =
+        this.phase === 'holding' && !this.resumeHoldPending && (this.holdElapsed > 5 || this.stamina < 0.35)
+          ? Math.min(3, Math.max((this.holdElapsed - 5) * 0.2, (0.35 - this.stamina) * 8))
+          : 0;
       const sx = shake > 0 ? Math.sin(this.animClock * 46) * shake : 0;
       ctx.save();
       ctx.translate(this.dogX + sx, this.dogY);
@@ -606,14 +801,29 @@ export class DogHangerStage {
       ctx.restore();
     }
 
-    // Ready grab circle
-    if (this.phase === 'ready') {
+    // Ready / resume grab circle
+    if (this.phase === 'ready' || this.resumeHoldPending) {
       const pulse = Math.sin(this.animClock * 5);
       ctx.strokeStyle = `rgba(251, 191, 36, ${0.7 + pulse * 0.2})`;
       ctx.lineWidth = 3.2;
       ctx.beginPath();
-      ctx.arc(this.dogX, this.dogY, 54 + pulse * 6, 0, Math.PI * 2);
+      ctx.arc(this.dogX, this.dogY, Math.min(56, this.dogSize * 1.65) + pulse * 5, 0, Math.PI * 2);
       ctx.stroke();
+    }
+
+    // Floating popups
+    for (const pop of this.popups) {
+      const alpha = Math.max(0, pop.life / pop.maxLife);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = '900 17px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+      ctx.lineWidth = 4;
+      ctx.strokeText(pop.text, pop.x, pop.y);
+      ctx.fillStyle = pop.color;
+      ctx.fillText(pop.text, pop.x, pop.y);
+      ctx.restore();
     }
 
     // Particles (pool splash, ripples, sparkles, sweat drops)
@@ -643,7 +853,6 @@ export class DogHangerStage {
       ctx.restore();
     }
 
-    // Fluttering butterflies
     for (const b of this.butterflies) {
       this.drawButterfly(ctx, b);
     }
@@ -651,12 +860,50 @@ export class DogHangerStage {
     ctx.restore();
   }
 
+  private drawStaminaMeter(ctx: CanvasRenderingContext2D, _width: number): void {
+    const barW = 112;
+    const barH = 12;
+    const bx = 14;
+    const by = this.anchorY + 14;
+    const low = this.stamina < 0.28;
+    const pulse = low ? 0.65 + 0.35 * Math.sin(this.animClock * 14) : 1;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
+    ctx.strokeStyle = low ? `rgba(248, 113, 113, ${pulse})` : 'rgba(255, 255, 255, 0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx - 4, by - 4, barW + 46, barH + 8, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = '800 10px system-ui, -apple-system, sans-serif';
+    ctx.fillStyle = low ? '#fca5a5' : '#e2e8f0';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('GRIP', bx + 2, by + barH / 2 + 0.5);
+
+    const trackX = bx + 34;
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.28)';
+    ctx.beginPath();
+    ctx.roundRect(trackX, by, barW, barH, 6);
+    ctx.fill();
+
+    const fillW = Math.max(0, barW * this.stamina);
+    if (fillW > 0) {
+      ctx.fillStyle = this.stamina > 0.55 ? '#22c55e' : this.stamina > 0.28 ? '#f59e0b' : '#ef4444';
+      ctx.beginPath();
+      ctx.roundRect(trackX, by, fillW, barH, 6);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   private drawSunnyParkBackdrop(
     ctx: CanvasRenderingContext2D,
     width: number,
-    height: number
+    height: number,
+    waterY: number
   ): void {
-    // Sunny sky gradient
     const grad = ctx.createLinearGradient(0, 0, 0, height);
     grad.addColorStop(0, '#0ea5e9');
     grad.addColorStop(0.48, '#7dd3fc');
@@ -665,38 +912,35 @@ export class DogHangerStage {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
 
-    // Warm sun with soft rays
-    const sunX = width * 0.82;
-    const sunY = height * 0.16;
-    const sunGlow = ctx.createRadialGradient(sunX, sunY, 12, sunX, sunY, 68);
+    const sunX = width * 0.84;
+    const sunY = Math.max(this.anchorY + 34, height * 0.18);
+    const sunGlow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, 58);
     sunGlow.addColorStop(0, 'rgba(254, 240, 138, 0.95)');
     sunGlow.addColorStop(0.35, 'rgba(253, 224, 71, 0.4)');
     sunGlow.addColorStop(1, 'rgba(253, 224, 71, 0)');
     ctx.fillStyle = sunGlow;
     ctx.beginPath();
-    ctx.arc(sunX, sunY, 68, 0, Math.PI * 2);
+    ctx.arc(sunX, sunY, 58, 0, Math.PI * 2);
     ctx.fill();
 
-    // Animated drifting clouds
     ctx.fillStyle = 'rgba(255, 255, 255, 0.86)';
     for (let i = 0; i < 4; i++) {
       const drift = (this.animClock * (10 + i * 3)) % (width + 140);
       const cx = ((i * 115 + drift) % (width + 140)) - 70;
-      const cy = height * (0.14 + (i % 3) * 0.09);
+      const cy = Math.max(this.anchorY + 26, height * (0.16 + (i % 3) * 0.08));
       ctx.beginPath();
-      ctx.ellipse(cx, cy, 42, 16, 0, 0, Math.PI * 2);
-      ctx.ellipse(cx - 20, cy + 4, 22, 12, 0, 0, Math.PI * 2);
-      ctx.ellipse(cx + 22, cy + 4, 24, 12, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, 40, 15, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx - 20, cy + 4, 21, 11, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx + 22, cy + 4, 22, 11, 0, 0, Math.PI * 2);
       ctx.fill();
     }
 
-    // Layered rolling green hills
-    const horizonY = height - 70;
+    const horizonY = waterY;
     ctx.fillStyle = '#4ade80';
     ctx.beginPath();
     ctx.moveTo(0, horizonY);
-    ctx.quadraticCurveTo(width * 0.26, horizonY - 82, width * 0.56, horizonY - 26);
-    ctx.quadraticCurveTo(width * 0.82, horizonY - 72, width, horizonY - 14);
+    ctx.quadraticCurveTo(width * 0.26, horizonY - 70, width * 0.56, horizonY - 22);
+    ctx.quadraticCurveTo(width * 0.82, horizonY - 62, width, horizonY - 12);
     ctx.lineTo(width, horizonY + 10);
     ctx.lineTo(0, horizonY + 10);
     ctx.closePath();
@@ -704,40 +948,38 @@ export class DogHangerStage {
 
     ctx.fillStyle = '#22c55e';
     ctx.beginPath();
-    ctx.moveTo(0, horizonY - 12);
-    ctx.quadraticCurveTo(width * 0.35, horizonY - 46, width * 0.68, horizonY - 12);
-    ctx.quadraticCurveTo(width * 0.88, horizonY - 34, width, horizonY - 6);
+    ctx.moveTo(0, horizonY - 10);
+    ctx.quadraticCurveTo(width * 0.35, horizonY - 40, width * 0.68, horizonY - 10);
+    ctx.quadraticCurveTo(width * 0.88, horizonY - 30, width, horizonY - 6);
     ctx.lineTo(width, horizonY + 10);
     ctx.lineTo(0, horizonY + 10);
     ctx.closePath();
     ctx.fill();
 
-    // Swaying park trees on left and right edges
     for (const side of [-1, 1]) {
       const tx = side === -1 ? 24 : width - 24;
       const sway = Math.sin(this.animClock * 1.4 + side) * 4;
       ctx.fillStyle = '#78350f';
-      ctx.fillRect(tx - 6, horizonY - 86, 12, 86);
+      ctx.fillRect(tx - 6, horizonY - 76, 12, 76);
       ctx.fillStyle = '#15803d';
       ctx.beginPath();
-      ctx.arc(tx + sway, horizonY - 98, 32, 0, Math.PI * 2);
-      ctx.arc(tx - 16 + sway, horizonY - 82, 22, 0, Math.PI * 2);
-      ctx.arc(tx + 16 + sway, horizonY - 82, 22, 0, Math.PI * 2);
+      ctx.arc(tx + sway, horizonY - 88, 28, 0, Math.PI * 2);
+      ctx.arc(tx - 15 + sway, horizonY - 74, 20, 0, Math.PI * 2);
+      ctx.arc(tx + 15 + sway, horizonY - 74, 20, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '#16a34a';
       ctx.beginPath();
-      ctx.arc(tx + sway - 4, horizonY - 104, 22, 0, Math.PI * 2);
+      ctx.arc(tx + sway - 4, horizonY - 92, 19, 0, Math.PI * 2);
       ctx.fill();
     }
 
-    // Backyard wooden fence along pool edge
     ctx.fillStyle = 'rgba(254, 243, 199, 0.82)';
-    ctx.fillRect(0, horizonY - 24, width, 4);
+    ctx.fillRect(0, horizonY - 22, width, 4);
     for (let fx = 8; fx < width; fx += 22) {
       ctx.beginPath();
-      ctx.moveTo(fx, horizonY - 30);
-      ctx.lineTo(fx + 5, horizonY - 36);
-      ctx.lineTo(fx + 10, horizonY - 30);
+      ctx.moveTo(fx, horizonY - 28);
+      ctx.lineTo(fx + 5, horizonY - 34);
+      ctx.lineTo(fx + 10, horizonY - 28);
       ctx.lineTo(fx + 10, horizonY);
       ctx.lineTo(fx, horizonY);
       ctx.closePath();
@@ -751,13 +993,11 @@ export class DogHangerStage {
     height: number,
     waterY: number
   ): void {
-    // Pool edge stone rim
     ctx.fillStyle = '#cbd5e1';
     ctx.fillRect(0, waterY - 6, width, 8);
     ctx.fillStyle = '#f8fafc';
     ctx.fillRect(0, waterY - 6, width, 2);
 
-    // Rich pool gradient
     const poolGrad = ctx.createLinearGradient(0, waterY, 0, height);
     poolGrad.addColorStop(0, '#38bdf8');
     poolGrad.addColorStop(0.45, '#0284c7');
@@ -765,7 +1005,6 @@ export class DogHangerStage {
     ctx.fillStyle = poolGrad;
     ctx.fillRect(0, waterY, width, height - waterY);
 
-    // Animated wave crests
     ctx.fillStyle = 'rgba(186, 230, 253, 0.55)';
     ctx.beginPath();
     ctx.moveTo(0, waterY + 8);
@@ -778,10 +1017,9 @@ export class DogHangerStage {
     ctx.closePath();
     ctx.fill();
 
-    // Sparkling sunlight glints dancing on water
     for (let i = 0; i < 8; i++) {
       const gx = ((i * 73 + 25) % 100) * 0.01 * width;
-      const gy = waterY + 14 + (i % 3) * 14;
+      const gy = waterY + 12 + (i % 3) * 12;
       const glint = Math.max(0, Math.sin(this.animClock * 4.5 + i * 1.7));
       if (glint > 0.35) {
         ctx.fillStyle = `rgba(255, 255, 255, ${glint * 0.85})`;
@@ -793,23 +1031,20 @@ export class DogHangerStage {
   }
 
   private drawParkBar(ctx: CanvasRenderingContext2D, width: number): void {
-    const barY = this.anchorY - 8;
+    const barY = this.anchorY - 6;
     const flexY = barY + this.barFlex;
 
-    // Sturdy wooden top beam
-    const woodGrad = ctx.createLinearGradient(0, barY - 22, 0, barY - 4);
+    const woodGrad = ctx.createLinearGradient(0, barY - 20, 0, barY - 4);
     woodGrad.addColorStop(0, '#b45309');
     woodGrad.addColorStop(0.5, '#92400e');
     woodGrad.addColorStop(1, '#451a03');
     ctx.fillStyle = woodGrad;
-    ctx.fillRect(0, barY - 22, width, 16);
+    ctx.fillRect(0, barY - 20, width, 15);
 
-    // Side wooden brackets
     ctx.fillStyle = '#78350f';
-    ctx.fillRect(8, barY - 6, 16, 18);
-    ctx.fillRect(width - 24, barY - 6, 16, 18);
+    ctx.fillRect(8, barY - 5, 16, 16);
+    ctx.fillRect(width - 24, barY - 5, 16, 16);
 
-    // Golden metallic park bar that flexes slightly under weight
     ctx.save();
     ctx.lineCap = 'round';
     const goldGrad = ctx.createLinearGradient(0, barY - 4, 0, flexY + 8);
@@ -831,7 +1066,6 @@ export class DogHangerStage {
     ctx.stroke();
     ctx.restore();
 
-    // Golden anchor ring
     const ringY = this.anchorY + this.barFlex * 0.5;
     ctx.fillStyle = '#fde047';
     ctx.strokeStyle = '#92400e';

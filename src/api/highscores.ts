@@ -56,7 +56,7 @@ export async function submitGlobalDogHangerScore(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         deviceId: payload.deviceId,
-        playerName: payload.playerName.trim() || 'Hondenbaas',
+        playerName: payload.playerName.trim() || 'Player',
         timeSec: payload.timeSec,
         breedId: payload.breedId,
         collarColor: payload.collarColor,
